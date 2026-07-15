@@ -13,11 +13,22 @@ class Order:
     loc:             tuple
     arrival_time:    float
     completion_time: Optional[float] = None
+    due_time:        Optional[float] = None   # 마감시한(SLA). None 이면 마감 없음.
+
+    def tardiness(self) -> float:
+        """실현 지연 = max(0, 완료 − 마감). 미완료/마감없음 → 0."""
+        if self.due_time is None or self.completion_time is None:
+            return 0.0
+        return max(0.0, self.completion_time - self.due_time)
+
+    def is_tardy(self) -> bool:
+        return self.tardiness() > 1e-9
 
 
 EVENT_ORDER_ARRIVAL = "ORDER_ARRIVAL"
 EVENT_NODE_ARRIVAL  = "ROBOT_NODE_ARRIVAL"
 EVENT_TRIP_COMPLETE = "ROBOT_TRIP_COMPLETE"
+EVENT_ORDER_DUE     = "ORDER_DUE"            # 마감시한 도래(overdue-integral 보상용)
 
 
 @dataclass(order=True)
@@ -56,10 +67,14 @@ class OrderManager:
     """
 
     def __init__(self, layout, lam: float, seed: int = 42,
-                 arrival: str = "stationary", burst_cfg: Optional[dict] = None):
+                 arrival: str = "stationary", burst_cfg: Optional[dict] = None,
+                 due_cfg: Optional[list] = None):
         self.layout   = layout
         self.lam      = lam
         self.arrival  = arrival
+        # due_cfg: [(prob, sla_seconds), ...]. None 이면 마감 없음(due_time=None).
+        # 예) [(0.3, 180), (0.7, 900)] = 30% urgent(SLA 3분) / 70% normal(15분).
+        self.due_cfg  = due_cfg
         self.burst_cfg = {
             "period": 1800.0,   # s — 버스트 주기(기본 30분)
             "amp":    0.8,      # sine 진폭
@@ -113,10 +128,24 @@ class OrderManager:
             if self._rng.random() <= self.lambda_at(t) / lam_max:
                 return t
 
+    def _sample_sla(self) -> Optional[float]:
+        if not self.due_cfg:
+            return None
+        r = self._rng.random()
+        cum = 0.0
+        for prob, sla in self.due_cfg:
+            cum += prob
+            if r <= cum:
+                return sla
+        return self.due_cfg[-1][1]   # 부동소수 잔차 대비
+
     def create_order(self, arrival_time: float) -> Order:
         sku             = self.layout.sample_order_sku(self._rng)
         loc_idx, loc    = self.layout.find_tote_location(sku, self._rng)
         order           = Order(self._cnt, sku, loc_idx, loc, arrival_time)
+        sla             = self._sample_sla()
+        if sla is not None:
+            order.due_time = arrival_time + sla
         self._cnt      += 1
         self.all_orders.append(order)
         return order
@@ -156,3 +185,18 @@ class OrderManager:
 
     def completed_count(self) -> int:
         return sum(1 for o in self.all_orders if o.completion_time is not None)
+
+    # ── 지연(tardiness) 지표 ──────────────────────────────────────────────────
+    def avg_tardiness(self) -> float:
+        """완료된 (마감 있는) 주문의 평균 지연 = mean max(0, 완료−마감)."""
+        ts = [o.tardiness() for o in self.all_orders
+              if o.completion_time is not None and o.due_time is not None]
+        return sum(ts) / len(ts) if ts else 0.0
+
+    def frac_tardy(self) -> float:
+        """완료된 (마감 있는) 주문 중 마감 위반 비율."""
+        done = [o for o in self.all_orders
+                if o.completion_time is not None and o.due_time is not None]
+        if not done:
+            return 0.0
+        return sum(1 for o in done if o.is_tardy()) / len(done)

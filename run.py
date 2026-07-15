@@ -12,7 +12,7 @@ from environment import (
 from agents import Robot, DQNAgent
 from manager import (
     OrderManager, EventQueue, Event, Order,
-    EVENT_ORDER_ARRIVAL, EVENT_NODE_ARRIVAL, EVENT_TRIP_COMPLETE,
+    EVENT_ORDER_ARRIVAL, EVENT_NODE_ARRIVAL, EVENT_TRIP_COMPLETE, EVENT_ORDER_DUE,
 )
 from metrics import MetricsStore, EpisodeResult, print_comparison, _SOLO_RT_M
 
@@ -56,6 +56,9 @@ class TrainingCurveStore:
 # 통로 그래프 거리모델 기준으로 재산정(이전 맨해튼 기준 150.9 와 거의 동일).
 _D_MAX = 147.4
 
+# 마감여유(slack) 정규화 스케일 (state feature). 최대 SLA 근처로 잡는다.
+_SLACK_SCALE = 900.0
+
 
 def compute_reward(
     robot:          Robot,
@@ -98,7 +101,8 @@ def compute_reward(
 class SimulatorBase:
     def __init__(self, layout: WarehouseLayout, lam: float, seed: int,
                  sim_time: float, num_robots: int, robot_capacity: int,
-                 arrival: str = "stationary", burst_cfg: Optional[Dict] = None):
+                 arrival: str = "stationary", burst_cfg: Optional[Dict] = None,
+                 due_cfg: Optional[list] = None):
         self.layout         = layout
         self.lam            = lam
         self.seed           = seed
@@ -107,11 +111,13 @@ class SimulatorBase:
         self.robot_capacity = robot_capacity
         self.arrival        = arrival
         self.burst_cfg      = burst_cfg
+        self.due_cfg        = due_cfg
 
         self.robots    = [Robot(i, layout.workstation, layout, robot_capacity)
                           for i in range(num_robots)]
         self.order_mgr = OrderManager(layout, lam=lam, seed=seed,
-                                      arrival=arrival, burst_cfg=burst_cfg)
+                                      arrival=arrival, burst_cfg=burst_cfg,
+                                      due_cfg=due_cfg)
         self.eq        = EventQueue()
         self.now       = 0.0
 
@@ -237,6 +243,8 @@ class SimulatorBase:
             mid_trip_rate        = self._mid_trip_count / max(1, self.order_mgr.completed_count()),
             extra_travel_m       = self._extra_travel,
             saving_per_insertion = self.saving_per_insertion(),
+            avg_tardiness        = self.order_mgr.avg_tardiness(),
+            frac_tardy           = self.order_mgr.frac_tardy(),
             reward               = reward,
             epsilon              = epsilon,
         )
@@ -254,9 +262,10 @@ class RLSimulator(SimulatorBase):
                  eval_mode: bool = False,
                  arrival: str = "stationary", burst_cfg: Optional[Dict] = None,
                  reward_mode: str = "detour",
-                 flow_cfg: Optional[Dict] = None):
+                 flow_cfg: Optional[Dict] = None,
+                 due_cfg: Optional[list] = None):
         super().__init__(layout, lam, seed, sim_time, num_robots, robot_capacity,
-                         arrival=arrival, burst_cfg=burst_cfg)
+                         arrival=arrival, burst_cfg=burst_cfg, due_cfg=due_cfg)
         self.agent        = agent
         self.reward_cfg   = reward_cfg or {}
         self.total_reward = 0.0
@@ -264,14 +273,19 @@ class RLSimulator(SimulatorBase):
         self._pending: Optional[tuple] = None   # (state, action, reward) — 다음 결정 시점에 완성
 
         # 보상 모드: "detour"=기존 exp(-α·Δd) / "flow"=혼잡비용(시간평균 WIP)+거리
+        #            "tardiness"=지연비용(시간평균 overdue 수)+거리
         self.reward_mode = reward_mode
         self.flow_cfg    = {"c_hold": 1.0, "c_dist": 0.2}
         if flow_cfg:
             self.flow_cfg.update(flow_cfg)
         self._wip_area        = 0.0    # ∫ N(τ) dτ  (order-seconds 누적)
         self._wip_last_t      = 0.0
-        self._wip_consumed    = 0.0    # 직전 결정까지 소비한 적분값
-        self._last_decision_t = 0.0    # 직전 결정 시각(구간 평균 WIP 계산용)
+        self._wip_consumed    = 0.0    # 직전 결정까지 소비한 WIP 적분값
+        self._last_decision_t = 0.0    # 직전 결정 시각(구간 평균 계산용)
+        self._n_overdue       = 0      # 현재 마감 지난 미완료 주문 수
+        self._tard_area       = 0.0    # ∫ N_overdue(τ) dτ  (= 총 지연)
+        self._tard_consumed   = 0.0    # 직전 결정까지 소비한 지연 적분값
+        self._overdue_ids: set = set() # 현재 overdue 로 카운트된 주문 id
 
     def reset(self, seed: int):
         self._reset_common(seed)
@@ -281,12 +295,26 @@ class RLSimulator(SimulatorBase):
         self._wip_last_t      = 0.0
         self._wip_consumed    = 0.0
         self._last_decision_t = 0.0
+        self._n_overdue       = 0
+        self._tard_area       = 0.0
+        self._tard_consumed   = 0.0
+        self._overdue_ids     = set()
 
     def _wip_advance(self):
-        """[_wip_last_t, now] 구간의 WIP 적분을 누적. N 은 그 구간 동안 상수."""
-        n = self.order_mgr.in_system()
-        self._wip_area  += n * (self.now - self._wip_last_t)
+        """[_wip_last_t, now] 구간의 WIP·지연 적분을 누적. 두 카운트 모두 구간 내 상수."""
+        dt = self.now - self._wip_last_t
+        self._wip_area  += self.order_mgr.in_system() * dt
+        self._tard_area += self._n_overdue * dt
         self._wip_last_t = self.now
+
+    def _complete_trip(self, robot: Robot):
+        # 완료되는 주문 중 overdue 로 카운트된 것 감소 (base 완료 처리 전에 목록 확보)
+        finishing = list(self._robot_orders.get(robot.id, []))
+        super()._complete_trip(robot)
+        for o in finishing:
+            if o.order_id in self._overdue_ids:
+                self._overdue_ids.discard(o.order_id)
+                self._n_overdue -= 1
 
     def run(self) -> List[tuple]:
         transitions = []
@@ -311,6 +339,11 @@ class RLSimulator(SimulatorBase):
                 self._handle_node_arrival(ev)
             elif ev.etype == EVENT_TRIP_COMPLETE:
                 self._handle_trip_complete(ev)
+            elif ev.etype == EVENT_ORDER_DUE:
+                order = ev.data["order"]
+                if order.completion_time is None:      # 마감 도래 시 아직 미완료 → overdue
+                    self._n_overdue += 1
+                    self._overdue_ids.add(order.order_id)
 
         # 에피소드 종료: 마지막 결정은 다음 결정 상태가 없으므로 done=True로 마감
         # (done=1이면 학습 타겟에서 next_q가 무시되므로 ns 자리는 사용되지 않는다)
@@ -325,15 +358,20 @@ class RLSimulator(SimulatorBase):
 
     def _handle_order_arrival(self, ev: Event) -> Optional[tuple]:
         order    = self.order_mgr.create_order(self.now)
+        # 마감시한 도래 이벤트 예약(대기열에 있어도 overdue 가능하므로 배정 전에 건다)
+        if order.due_time is not None:
+            self.eq.push(Event(order.due_time, EVENT_ORDER_DUE, {"order": order}))
         eligible = [r for r in self.robots if r.idle_slots > 0]
 
         if not eligible:
             self.order_mgr.enqueue(order, self.now)
             return None
 
+        slack_norm = (max(0.0, min((order.due_time - self.now) / _SLACK_SCALE, 1.0))
+                      if order.due_time is not None else 1.0)
         state  = self.agent.encode_state(order.loc, self.robots,
                                          self.order_mgr.queue_size(),
-                                         now=self.now)
+                                         now=self.now, order_slack_norm=slack_norm)
         mask   = self.agent.build_action_mask(self.robots, moving_only=False)
         action = self.agent.select_action(state, mask)
         if action < 0:
@@ -356,6 +394,18 @@ class RLSimulator(SimulatorBase):
             fc     = self.flow_cfg
             cap    = max(1, self.num_robots * self.robot_capacity)
             reward = -(fc["c_hold"] * avg_n / cap
+                       + fc["c_dist"] * delta_d / _D_MAX)
+        elif self.reward_mode == "tardiness":
+            # 직전 결정 이후 구간의 '평균 overdue 수'(지연압력)를 용량으로 정규화 + 거리.
+            # 총 return ≈ -c·(총 지연). overdue 는 미래에 드러나므로 비근시안 신호.
+            tard   = self._tard_area - self._tard_consumed          # ∫N_overdue dt (구간)
+            dt     = max(self.now - self._last_decision_t, 1e-6)
+            avg_od = tard / dt                                      # 구간 평균 overdue
+            self._tard_consumed   = self._tard_area
+            self._last_decision_t = self.now
+            fc     = self.flow_cfg
+            cap    = max(1, self.num_robots * self.robot_capacity)
+            reward = -(fc["c_hold"] * avg_od / cap
                        + fc["c_dist"] * delta_d / _D_MAX)
         else:
             reward = compute_reward(
@@ -606,7 +656,8 @@ def train(layout:         WarehouseLayout,
           burst_cfg:      Dict  = None,
           reward_mode:    str   = "detour",
           flow_cfg:       Dict  = None,
-          updates_per_episode: int = 1) -> None:
+          updates_per_episode: int = 1,
+          due_cfg:        list  = None) -> None:
 
     reward_cfg = reward_cfg or {}
     lam_lo, lam_hi = _CURRICULUM_LAM_RANGE.get(num_robots, (lam * 0.6, lam))
@@ -615,7 +666,8 @@ def train(layout:         WarehouseLayout,
                          num_robots=num_robots, robot_capacity=robot_capacity,
                          reward_cfg=reward_cfg,
                          arrival=arrival, burst_cfg=burst_cfg,
-                         reward_mode=reward_mode, flow_cfg=flow_cfg)
+                         reward_mode=reward_mode, flow_cfg=flow_cfg,
+                         due_cfg=due_cfg)
     rng = random.Random(seed)
 
     for ep in range(1, total_episodes + 1):

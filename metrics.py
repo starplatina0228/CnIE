@@ -33,6 +33,8 @@ class EpisodeResult:
     mid_trip_rate:          float = 0.0
     extra_travel_m:         float = 0.0
     saving_per_insertion:   float = 0.0  # 삽입 1건당 절감 이동거리 (m)
+    avg_tardiness:          float = 0.0  # 평균 지연 max(0, 완료−마감) (s)
+    frac_tardy:             float = 0.0  # 마감 위반 비율
     reward:                 float = 0.0
     epsilon:                float = 0.0
 
@@ -92,6 +94,8 @@ class MetricsStore:
 METRIC_DISPLAY = {
     "n_completed":           (True,  "Completed Orders"),
     "completion_rate":       (True,  "Completion Rate"),
+    "avg_tardiness":         (False, "Avg Tardiness (s)"),
+    "frac_tardy":            (False, "Tardy Rate"),
     "avg_flow_time":         (False, "Avg Flow Time (s)"),
     "avg_wait_time":         (False, "Avg Wait Time (s)"),
     "robot_utilization":     (True,  "Robot Utilization"),

@@ -169,11 +169,11 @@ class Robot:
 
 def build_state_dim(num_robots: int, robot_capacity: int) -> int:
     """
-    order_loc     : 2
+    order_feats   : 3  (loc_x, loc_y, slack_norm)   ← slack = 남은 마감여유
     per_robot     : 5 + robot_capacity*2  (pos, idle_norm, is_idle, rem_t, route)
     global_feats  : 2  (queue_len_norm, elapsed_norm)
     """
-    return 2 + num_robots * (5 + robot_capacity * 2) + 2
+    return 3 + num_robots * (5 + robot_capacity * 2) + 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -327,9 +327,10 @@ class DQNAgent:
     # ── 상태 인코딩 ───────────────────────────────────────────────────────────
     def encode_state(self, order_loc: Tuple[float, float],
                      robots: List[Robot], n_wait: int,
-                     now: float = 0.0) -> np.ndarray:
+                     now: float = 0.0, order_slack_norm: float = 1.0) -> np.ndarray:
         robot_feat_dim = 5 + self.robot_capacity * 2
-        vec = [order_loc[0] / _COORD_X_MAX, order_loc[1] / _COORD_Y_MAX]
+        vec = [order_loc[0] / _COORD_X_MAX, order_loc[1] / _COORD_Y_MAX,
+               order_slack_norm]
         for r in robots:
             vec.extend(r.state_vector(self.robot_capacity).tolist())
         for _ in range(self.num_robots - len(robots)):

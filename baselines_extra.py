@@ -145,3 +145,29 @@ class RandomSimulator(_InsertionHeuristicSimulator):
 
     def _select_robot(self, eligible, order):
         return self._rng.choice(eligible)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BL-7: Min-Completion (마감/지연 greedy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MinCompletionSimulator(_InsertionHeuristicSimulator):
+    """주문의 '예상 완료 시각'이 가장 이른 로봇에 배정.
+
+    선택 규칙:  robot* = argmin_r ( 남은경로거리_r + Δd_r )
+        = now 이후 그 주문이 완료(로봇 복귀)될 때까지의 총 이동거리.
+    Cheapest(Δd 만)와 달리 로봇의 '현재 backlog'까지 반영해 언제 끝나는지를
+    최소화한다. 마감을 직접 보진 않지만 완료를 앞당겨 지연을 줄이는, tardiness
+    목적에서의 강한 근시안 휴리스틱이다.
+
+    RL 과의 대비: 이 규칙은 '현재 주문'의 완료만 그리디하게 앞당긴다. 그 배정이
+    같은 로봇의 다른 주문·미래 도착(특히 urgent 버스트)을 얼마나 지연시키는지는
+    보지 못한다. RL 은 slack 을 state 로 보고 overdue 적분 보상으로 그걸 학습한다.
+    """
+
+    def _select_robot(self, eligible, order):
+        return min(
+            eligible,
+            key=lambda r: (r._remaining_route_dist(self.layout)
+                           + r.delta_distance_insert(order.loc, self.layout)),
+        )
