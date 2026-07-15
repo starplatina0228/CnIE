@@ -1,0 +1,16 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# 스모크런 산출물 (재현 불필요, 논문 수치 아님)
+logs/*_smoke.csv
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# OS / 에디터
+.DS_Store
+.idea/
+.vscode/
