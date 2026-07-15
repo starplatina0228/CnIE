@@ -605,7 +605,8 @@ def train(layout:         WarehouseLayout,
           arrival:        str   = "stationary",
           burst_cfg:      Dict  = None,
           reward_mode:    str   = "detour",
-          flow_cfg:       Dict  = None) -> None:
+          flow_cfg:       Dict  = None,
+          updates_per_episode: int = 1) -> None:
 
     reward_cfg = reward_cfg or {}
     lam_lo, lam_hi = _CURRICULUM_LAM_RANGE.get(num_robots, (lam * 0.6, lam))
@@ -629,7 +630,9 @@ def train(layout:         WarehouseLayout,
 
         for trans in transitions:
             agent.push(*trans)
-        loss = agent.train_step()
+        loss = None
+        for _ in range(max(1, updates_per_episode)):   # 에피소드당 다수 그래디언트 업데이트
+            loss = agent.train_step()
         agent.decay_epsilon(total_episodes)
 
         result = rl_sim.build_result(label, ep, ep_lam,

@@ -61,6 +61,8 @@ SEED      = 42
 EVAL_SEED0 = 40000                       # 평가 seed 시작(모든 블록 공통 → 블록 간도 paired)
 BASELINES = ["BL5_Cheapest", "BL4_Nearest", "BL6_Random",
              "BL1_FullBuffer", "BL2_Partial_k3"]
+UPDATES_PER_EP = 20                      # 에피소드당 그래디언트 업데이트
+                                         # (기본 train()은 1 → 심한 under-training. 여기서 상향)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,6 +108,7 @@ def run_block(block: dict, layout: WarehouseLayout, force: bool) -> Optional[Met
     eval_lams  = block["eval_lams_hr"]
     reward_modes = block["reward_modes"]     # 학습할 RL 에이전트(예: ["flow","detour"])
     baselines  = block.get("baselines", BASELINES)
+    updates    = block.get("updates_per_episode", UPDATES_PER_EP)
 
     t0 = time.time()
     print(f"\n{'='*66}\n[block] {name}  M={M} arrival={arrival} "
@@ -121,7 +124,8 @@ def run_block(block: dict, layout: WarehouseLayout, force: bool) -> Optional[Met
               total_episodes=episodes, num_robots=M, robot_capacity=K,
               label=f"RL_{rm}_train", verbose_every=max(1, episodes // 3),
               arrival=arrival, burst_cfg=burst_cfg,
-              reward_mode=rm, flow_cfg=flow_cfg)
+              reward_mode=rm, flow_cfg=flow_cfg,
+              updates_per_episode=updates)
         agents[rm] = ag
 
     # ── 평가 (eval_lams × 모든 정책 × paired seeds) ──────────────────────────
@@ -145,6 +149,7 @@ def run_block(block: dict, layout: WarehouseLayout, force: bool) -> Optional[Met
 
     store.save_csv(raw_path)
     cfg = dict(block)
+    cfg["updates_per_episode"] = updates
     cfg["elapsed_sec"] = round(time.time() - t0, 1)
     cfg["timestamp"]   = time.strftime("%Y-%m-%d %H:%M:%S")
     with open(os.path.join(bdir, "config.json"), "w") as f:
@@ -240,7 +245,7 @@ def build_sweep(smoke: bool) -> List[dict]:
                  baselines=["BL5_Cheapest", "BL4_Nearest", "BL6_Random"]),
         ]
 
-    EP, NE = 1500, 20
+    EP, NE = 2000, 20
     blocks: List[dict] = []
     # T1/T2/T3 — 버스트 메인(방법론 비교 + 부하 민감도 + 보상 ablation)
     blocks.append(dict(
