@@ -225,14 +225,15 @@ _BURST = {"period": 1800.0, "duty": 0.25, "high": 2.5, "low": 0.5}
 
 def build_sweep(smoke: bool) -> List[dict]:
     if smoke:
-        # 동작 검증용 축소 — 논문 수치 아님
+        # 동작 검증용 축소 — 논문 수치 아님. 'smoke_' 접두로 real 블록 dir 과 분리한다
+        # (smoke 산출물이 exp/burst_main 등 real 결과를 덮거나 skip 시키지 않도록).
         return [
-            dict(name="burst_main", M=5, K=5, arrival="burst", burst_cfg=_BURST,
+            dict(name="smoke_burst_main", M=5, K=5, arrival="burst", burst_cfg=_BURST,
                  lam_train_hr=550, reward_modes=["flow", "detour"],
                  flow_cfg={"c_hold": 1.0, "c_dist": 0.1},
                  eval_lams_hr=[500, 600], episodes=60, n_eval=3,
                  baselines=["BL5_Cheapest", "BL4_Nearest", "BL6_Random"]),
-            dict(name="stationary_ref", M=5, K=5, arrival="stationary", burst_cfg=None,
+            dict(name="smoke_stationary_ref", M=5, K=5, arrival="stationary", burst_cfg=None,
                  lam_train_hr=500, reward_modes=["flow", "detour"],
                  flow_cfg={"c_hold": 1.0, "c_dist": 0.1},
                  eval_lams_hr=[500], episodes=60, n_eval=3,
@@ -291,13 +292,15 @@ def main():
         if not blocks:
             raise SystemExit(f"--only {args.only} 에 해당하는 블록 없음")
 
+    # smoke 는 검증용이므로 항상 새로 실행(스킵 없음). real 만 resume(스킵) 적용.
+    force = args.force or args.smoke
     if args.smoke:
-        print(">> SMOKE SWEEP — 축소 설정 (동작 검증용, 논문 수치 아님)")
+        print(">> SMOKE SWEEP — 축소 설정 (동작 검증용, 논문 수치 아님; 매번 재실행)")
     print(f"실행할 블록: {[b['name'] for b in blocks]}")
 
     primary = None
     for b in blocks:
-        st = run_block(b, layout, force=args.force)
+        st = run_block(b, layout, force=force)
         if primary is None and st is not None:
             primary = (b, st)
 
