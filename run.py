@@ -58,6 +58,8 @@ _D_MAX = 147.4
 
 # 마감여유(slack) 정규화 스케일 (state feature). 최대 SLA 근처로 잡는다.
 _SLACK_SCALE = 900.0
+# 예상 완료시각(est completion duration) 정규화 스케일 (guided feature).
+_EST_DUR_SCALE = 600.0
 
 
 def compute_reward(
@@ -369,9 +371,19 @@ class RLSimulator(SimulatorBase):
 
         slack_norm = (max(0.0, min((order.due_time - self.now) / _SLACK_SCALE, 1.0))
                       if order.due_time is not None else 1.0)
+        # guided feature: 이 주문을 각 로봇에 넣었을 때 예상 완료(dur)·예상 지연
+        slack_dur = (order.due_time - self.now) if order.due_time is not None else 1e9
+        guided = []
+        for r in self.robots:
+            est_dur  = (r._remaining_route_dist(self.layout)
+                        + r.delta_distance_insert(order.loc, self.layout)) / ROBOT_SPEED
+            est_tard = max(0.0, est_dur - slack_dur)
+            guided.append((min(est_dur / _EST_DUR_SCALE, 1.0),
+                           min(est_tard / _SLACK_SCALE, 1.0)))
         state  = self.agent.encode_state(order.loc, self.robots,
                                          self.order_mgr.queue_size(),
-                                         now=self.now, order_slack_norm=slack_norm)
+                                         now=self.now, order_slack_norm=slack_norm,
+                                         guided=guided)
         mask   = self.agent.build_action_mask(self.robots, moving_only=False)
         action = self.agent.select_action(state, mask)
         if action < 0:

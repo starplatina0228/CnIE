@@ -170,10 +170,15 @@ class Robot:
 def build_state_dim(num_robots: int, robot_capacity: int) -> int:
     """
     order_feats   : 3  (loc_x, loc_y, slack_norm)   ← slack = 남은 마감여유
-    per_robot     : 5 + robot_capacity*2  (pos, idle_norm, is_idle, rem_t, route)
+    per_robot     : 7 + robot_capacity*2
+        (pos, idle_norm, is_idle, rem_t, route,  + guided: est_완료시각, est_지연)
     global_feats  : 2  (queue_len_norm, elapsed_norm)
+
+    guided feature(각 로봇에 이 주문을 넣었을 때의 예상 완료시각·예상 지연)를 넣어,
+    RL 이 MinCompletion 같은 완료-최소 규칙을 쉽게 재현하고 거기서 urgency 기반
+    이탈을 학습하도록 한다(residual/guided RL).
     """
-    return 3 + num_robots * (5 + robot_capacity * 2) + 2
+    return 3 + num_robots * (7 + robot_capacity * 2) + 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -327,12 +332,20 @@ class DQNAgent:
     # ── 상태 인코딩 ───────────────────────────────────────────────────────────
     def encode_state(self, order_loc: Tuple[float, float],
                      robots: List[Robot], n_wait: int,
-                     now: float = 0.0, order_slack_norm: float = 1.0) -> np.ndarray:
-        robot_feat_dim = 5 + self.robot_capacity * 2
+                     now: float = 0.0, order_slack_norm: float = 1.0,
+                     guided: Optional[List[Tuple[float, float]]] = None) -> np.ndarray:
+        """guided: 로봇별 (예상 완료시각_norm, 예상 지연_norm). None 이면 0 으로 채움.
+
+        각 로봇 블록에 그 로봇에 이 주문을 넣었을 때의 완료/지연 예측을 붙여
+        Q-network 가 로봇 i 의 정보와 액션 i 를 정렬해 배울 수 있게 한다.
+        """
+        robot_feat_dim = 7 + self.robot_capacity * 2
         vec = [order_loc[0] / _COORD_X_MAX, order_loc[1] / _COORD_Y_MAX,
                order_slack_norm]
-        for r in robots:
+        for i, r in enumerate(robots):
             vec.extend(r.state_vector(self.robot_capacity).tolist())
+            g = guided[i] if (guided is not None and i < len(guided)) else (0.0, 0.0)
+            vec.extend([g[0], g[1]])
         for _ in range(self.num_robots - len(robots)):
             vec.extend([0.0] * robot_feat_dim)
         queue_len_norm = min(n_wait / 20.0, 1.0)
