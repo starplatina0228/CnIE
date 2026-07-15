@@ -5,6 +5,14 @@ __pycache__/
 # 스모크런 산출물 (재현 불필요, 논문 수치 아님)
 logs/*_smoke.csv
 
+# 분석 생성물(재생성 가능) — 필요하면 git add -f 로 공유
+logs/table_main.tex
+logs/summary_by_policy.csv
+
+# 스윕 결과 폴더(생성물). 실제 결과를 공유하려면: git add -f exp/summary_master.csv
+# (블록 raw.csv 를 커밋하면 원격 재실행이 skip 되니 주의 — 공유 시 summary 만 권장)
+exp/
+
 # 가상환경
 .venv/
 venv/

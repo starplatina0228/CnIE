@@ -67,6 +67,21 @@ python exp_future_reward.py --M 5 --lam 550 --c-hold 1.0 --c-dist 0.1 --episodes
 > (예: λ̄=500~550/hr, ρ_mean≈0.85~0.92, ρ_peak>1)에서 두드러진다. 저부하에선
 > 어떤 정책이든 큐가 안 쌓여 격차가 안 난다.
 
+### 실험 스윕 (권장 — 논문 표 T1~T6을 exp/ 에 기록)
+λ·보상가중치 등을 여러 개 돌려 `exp/summary_master.csv` 한 파일로 모읍니다.
+```bash
+python sweep.py --smoke              # 동작 검증(수 분)
+python sweep.py                      # 전체(원격/장시간) → exp/ 에 기록
+python sweep.py --only burst_main    # 특정 블록만
+python sweep.py --force              # 이미 된 블록도 재실행
+```
+- 하이퍼파라미터를 바꾸려면 `sweep.py` 의 `build_sweep()` grid(λ 목록, `flow_cfg`
+  의 c_hold/c_dist, burst `high/duty`, M)를 편집하세요.
+- 산출: `exp/<block>/raw.csv`(paired 원자료), `exp/<block>/config.json`,
+  `exp/summary_master.csv`(정책·λ별 mean±std — 여기서 표 피벗).
+- 상세표는 개별 블록에: `python analyze_baselines.py --csv exp/burst_main/raw.csv`
+- `exp/` 는 gitignore(생성물). 결과 공유는 `git add -f exp/summary_master.csv`.
+
 ### 기존 실험 (Phase 1 격자 + Phase 2 γ 민감도)
 ```bash
 python run.py
