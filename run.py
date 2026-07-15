@@ -97,17 +97,21 @@ def compute_reward(
 
 class SimulatorBase:
     def __init__(self, layout: WarehouseLayout, lam: float, seed: int,
-                 sim_time: float, num_robots: int, robot_capacity: int):
+                 sim_time: float, num_robots: int, robot_capacity: int,
+                 arrival: str = "stationary", burst_cfg: Optional[Dict] = None):
         self.layout         = layout
         self.lam            = lam
         self.seed           = seed
         self.sim_time       = sim_time
         self.num_robots     = num_robots
         self.robot_capacity = robot_capacity
+        self.arrival        = arrival
+        self.burst_cfg      = burst_cfg
 
         self.robots    = [Robot(i, layout.workstation, layout, robot_capacity)
                           for i in range(num_robots)]
-        self.order_mgr = OrderManager(layout, lam=lam, seed=seed)
+        self.order_mgr = OrderManager(layout, lam=lam, seed=seed,
+                                      arrival=arrival, burst_cfg=burst_cfg)
         self.eq        = EventQueue()
         self.now       = 0.0
 
@@ -247,18 +251,42 @@ class RLSimulator(SimulatorBase):
                  lam: float, seed: int, sim_time: float = SIM_TIME,
                  num_robots: int = 4, robot_capacity: int = 5,
                  reward_cfg: Optional[Dict] = None,
-                 eval_mode: bool = False):
-        super().__init__(layout, lam, seed, sim_time, num_robots, robot_capacity)
+                 eval_mode: bool = False,
+                 arrival: str = "stationary", burst_cfg: Optional[Dict] = None,
+                 reward_mode: str = "detour",
+                 flow_cfg: Optional[Dict] = None):
+        super().__init__(layout, lam, seed, sim_time, num_robots, robot_capacity,
+                         arrival=arrival, burst_cfg=burst_cfg)
         self.agent        = agent
         self.reward_cfg   = reward_cfg or {}
         self.total_reward = 0.0
         self.eval_mode    = eval_mode
         self._pending: Optional[tuple] = None   # (state, action, reward) — 다음 결정 시점에 완성
 
+        # 보상 모드: "detour"=기존 exp(-α·Δd) / "flow"=혼잡비용(시간평균 WIP)+거리
+        self.reward_mode = reward_mode
+        self.flow_cfg    = {"c_hold": 1.0, "c_dist": 0.2}
+        if flow_cfg:
+            self.flow_cfg.update(flow_cfg)
+        self._wip_area        = 0.0    # ∫ N(τ) dτ  (order-seconds 누적)
+        self._wip_last_t      = 0.0
+        self._wip_consumed    = 0.0    # 직전 결정까지 소비한 적분값
+        self._last_decision_t = 0.0    # 직전 결정 시각(구간 평균 WIP 계산용)
+
     def reset(self, seed: int):
         self._reset_common(seed)
-        self.total_reward = 0.0
-        self._pending     = None
+        self.total_reward     = 0.0
+        self._pending         = None
+        self._wip_area        = 0.0
+        self._wip_last_t      = 0.0
+        self._wip_consumed    = 0.0
+        self._last_decision_t = 0.0
+
+    def _wip_advance(self):
+        """[_wip_last_t, now] 구간의 WIP 적분을 누적. N 은 그 구간 동안 상수."""
+        n = self.order_mgr.in_system()
+        self._wip_area  += n * (self.now - self._wip_last_t)
+        self._wip_last_t = self.now
 
     def run(self) -> List[tuple]:
         transitions = []
@@ -271,6 +299,7 @@ class RLSimulator(SimulatorBase):
             if ev.time > self.sim_time:
                 break
             self.now = ev.time
+            self._wip_advance()   # 이벤트 처리 전 상태의 N 으로 적분(구간별 정확)
             if ev.etype == EVENT_ORDER_ARRIVAL:
                 t = self._handle_order_arrival(ev)
                 if t:
@@ -315,14 +344,28 @@ class RLSimulator(SimulatorBase):
         delta_d = robot.delta_distance_insert(order.loc, self.layout)
         self._extra_travel += delta_d
 
-        reward = compute_reward(
-            robot, order.loc, self.layout,
-            robots=self.robots,
-            n_wait=self.order_mgr.queue_size(),
-            num_robots=self.num_robots,
-            robot_capacity=self.robot_capacity,
-            **self.reward_cfg,
-        )
+        if self.reward_mode == "flow":
+            # 직전 결정 이후 구간의 '평균 in-system 수'(혼잡)를 용량으로 정규화한 비용
+            # + 거리항. 부호는 비용의 음수. 한 결정이 N(τ)에 주는 영향은 미래 구간에
+            # 나타나므로 γ·N-step return 을 통한 multi-step credit assignment 이 된다.
+            holding = self._wip_area - self._wip_consumed          # ∫N dt (구간)
+            dt      = max(self.now - self._last_decision_t, 1e-6)
+            avg_n   = holding / dt                                 # 구간 평균 in-system
+            self._wip_consumed    = self._wip_area
+            self._last_decision_t = self.now
+            fc     = self.flow_cfg
+            cap    = max(1, self.num_robots * self.robot_capacity)
+            reward = -(fc["c_hold"] * avg_n / cap
+                       + fc["c_dist"] * delta_d / _D_MAX)
+        else:
+            reward = compute_reward(
+                robot, order.loc, self.layout,
+                robots=self.robots,
+                n_wait=self.order_mgr.queue_size(),
+                num_robots=self.num_robots,
+                robot_capacity=self.robot_capacity,
+                **self.reward_cfg,
+            )
         self.total_reward += reward
 
         self.agent.apply_action(action, order.loc, self.robots, self.layout)
@@ -558,14 +601,20 @@ def train(layout:         WarehouseLayout,
           reward_cfg:     Dict  = None,
           label:          str   = "RL",
           verbose_every:  int   = 50,
-          curve_store:    Optional["TrainingCurveStore"] = None) -> None:
+          curve_store:    Optional["TrainingCurveStore"] = None,
+          arrival:        str   = "stationary",
+          burst_cfg:      Dict  = None,
+          reward_mode:    str   = "detour",
+          flow_cfg:       Dict  = None) -> None:
 
     reward_cfg = reward_cfg or {}
     lam_lo, lam_hi = _CURRICULUM_LAM_RANGE.get(num_robots, (lam * 0.6, lam))
 
     rl_sim = RLSimulator(layout, agent, lam=lam, seed=seed,
                          num_robots=num_robots, robot_capacity=robot_capacity,
-                         reward_cfg=reward_cfg)
+                         reward_cfg=reward_cfg,
+                         arrival=arrival, burst_cfg=burst_cfg,
+                         reward_mode=reward_mode, flow_cfg=flow_cfg)
     rng = random.Random(seed)
 
     for ep in range(1, total_episodes + 1):

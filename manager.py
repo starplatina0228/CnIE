@@ -1,4 +1,5 @@
 import heapq
+import math
 import random
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -41,11 +42,36 @@ class EventQueue:
 
 
 class OrderManager:
-    def __init__(self, layout, lam: float, seed: int = 42):
-        self.layout  = layout
-        self.lam     = lam
+    """주문 도착 프로세스 관리.
+
+    arrival 프로파일
+    ────────────────
+      "stationary" : 상수 λ 의 정상 Poisson (기존 동작, 기본값).
+      "sine"       : λ(t) = λ·(1 + amp·sin(2π t/period)),   평균 부하 = λ.
+      "burst"      : on/off 사각파. 주기 period 안에서 duty 비율만 λ·high,
+                     나머지는 λ·low. 기본값(duty=.25, high=2.5, low=.5)은
+                     평균 부하를 λ 로 보존하되 순간 최대 2.5λ 의 버스트를 만든다.
+
+    비정상 프로파일은 thinning(accept-reject, 상한 λ_max)으로 정확히 샘플링한다.
+    """
+
+    def __init__(self, layout, lam: float, seed: int = 42,
+                 arrival: str = "stationary", burst_cfg: Optional[dict] = None):
+        self.layout   = layout
+        self.lam      = lam
+        self.arrival  = arrival
+        self.burst_cfg = {
+            "period": 1800.0,   # s — 버스트 주기(기본 30분)
+            "amp":    0.8,      # sine 진폭
+            "duty":   0.25,     # burst on 비율
+            "high":   2.5,      # on 배율
+            "low":    0.5,      # off 배율
+        }
+        if burst_cfg:
+            self.burst_cfg.update(burst_cfg)
         self._rng    = random.Random(seed)
         self._cnt    = 0
+        self._n_completed_run = 0     # 완료 카운터(WIP 적분용, O(1) 조회)
         self.wait_queue:         List[Order] = []
         self.all_orders:         List[Order] = []
         self._queue_entry_times: List[float] = []
@@ -53,12 +79,39 @@ class OrderManager:
     def reset(self, seed: int):
         self._rng = random.Random(seed)
         self._cnt = 0
+        self._n_completed_run = 0
         self.wait_queue.clear()
         self.all_orders.clear()
         self._queue_entry_times.clear()
 
+    # ── 시각 t 의 순시 도착률 λ(t) ────────────────────────────────────────────
+    def lambda_at(self, t: float) -> float:
+        c = self.burst_cfg
+        if self.arrival == "sine":
+            return self.lam * (1.0 + c["amp"] * math.sin(2.0 * math.pi * t / c["period"]))
+        if self.arrival == "burst":
+            phase = (t % c["period"]) / c["period"]
+            return self.lam * (c["high"] if phase < c["duty"] else c["low"])
+        return self.lam   # stationary
+
+    def _lambda_max(self) -> float:
+        c = self.burst_cfg
+        if self.arrival == "sine":
+            return self.lam * (1.0 + c["amp"])
+        if self.arrival == "burst":
+            return self.lam * c["high"]
+        return self.lam
+
     def generate_next_arrival(self, current_time: float) -> float:
-        return current_time + self._rng.expovariate(self.lam)
+        if self.arrival == "stationary":
+            return current_time + self._rng.expovariate(self.lam)
+        # 비정상: thinning (Lewis-Shedler)
+        lam_max = self._lambda_max()
+        t = current_time
+        while True:
+            t += self._rng.expovariate(lam_max)
+            if self._rng.random() <= self.lambda_at(t) / lam_max:
+                return t
 
     def create_order(self, arrival_time: float) -> Order:
         sku             = self.layout.sample_order_sku(self._rng)
@@ -85,6 +138,11 @@ class OrderManager:
 
     def record_completion(self, order: Order, time: float):
         order.completion_time = time
+        self._n_completed_run += 1
+
+    def in_system(self) -> int:
+        """현재 시스템 내 미완료 주문 수 (도착−완료). WIP 적분에 사용. O(1)."""
+        return len(self.all_orders) - self._n_completed_run
 
     def avg_wait_time(self) -> float:
         waits = [

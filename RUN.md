@@ -47,6 +47,26 @@ python exp_baselines.py \
 ```
 결과: `logs/exp_baselines.csv` (에피소드별 원자료, paired) + 콘솔 비교표.
 
+### 비교 테이블 생성 (위 CSV → 논문용 표 + LaTeX)
+```bash
+python analyze_baselines.py --csv logs/exp_baselines.csv
+# → 콘솔 3개 표 + logs/table_main.tex + logs/summary_by_policy.csv
+```
+
+### 버스트 수요 + holding-cost 보상 실험 (RL 우수성 핵심)
+비정상(버스트) 수요 + 미래보상(시간평균 WIP) 하에서 RL_flow vs RL_detour(보상
+ablation) vs Cheapest/Nearest/Random/Full-Buffer 를 동일 수요·paired seed 로 비교.
+```bash
+python exp_future_reward.py --smoke                       # 동작 검증(~1분)
+python exp_future_reward.py --M 5 --lam 400 \
+        --episodes 1200 --n-eval 20                       # 논문용 전체
+# 운영점/보상 가중치 스윕 예:
+python exp_future_reward.py --M 5 --lam 550 --c-hold 1.0 --c-dist 0.1 --episodes 1500
+```
+> RL 우수성은 **부하가 충분히 높아 버스트가 실제 saturation 을 일으키는 구간**
+> (예: λ̄=500~550/hr, ρ_mean≈0.85~0.92, ρ_peak>1)에서 두드러진다. 저부하에선
+> 어떤 정책이든 큐가 안 쌓여 격차가 안 난다.
+
 ### 기존 실험 (Phase 1 격자 + Phase 2 γ 민감도)
 ```bash
 python run.py
