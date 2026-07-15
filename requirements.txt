@@ -1,8 +1,13 @@
 # CnIE — 창고 로봇 디스패칭 D3QN 실험
 #
-# 검증 환경: Python 3.11, torch 2.11.0 (CPU 빌드), numpy 2.4.4, matplotlib 3.10.9
-# 학습/추론 모두 CPU 전용입니다 (agents.py 가 torch.device("cpu") 로 고정).
-# → CUDA/GPU 불필요. torch 는 CPU 휠만 설치하면 됩니다.
+# 검증 환경: Python 3.11, torch 2.11.0, numpy 2.4.4, matplotlib 3.10.9
+#
+# 디바이스: agents.py 가 자동 감지(cuda 있으면 cuda, 없으면 cpu). 환경변수로 강제 가능:
+#   CNIE_DEVICE=cuda|cpu|mps  (예: CNIE_DEVICE=cpu python sweep.py)
+# GPU 로 학습하려면 CUDA 빌드 torch 설치:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121   # (예: CUDA 12.1)
+# ※ 주의: 이 워크로드는 작은 MLP + 매 결정 단건 추론 + CPU 이벤트 시뮬이 지배적이라
+#   GPU 가 오히려 느릴 수 있습니다. 원격에서 --smoke 로 cuda vs cpu 실측 후 택하세요.
 #
 # stdlib 외 실제 의존성은 아래 3개뿐 (csv/random/os/heapq/dataclasses/argparse 등은 표준 라이브러리).
 

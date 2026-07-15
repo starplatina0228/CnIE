@@ -1,6 +1,25 @@
 # 실행 방법 (원격/다른 머신)
 
-CPU 전용입니다. GPU/CUDA 없이도 그대로 돌아갑니다.
+디바이스는 자동 감지됩니다(cuda 있으면 cuda, 없으면 cpu). GPU 없이도 그대로 돌아갑니다.
+
+## 0. 디바이스 (GPU/CPU)
+`agents.py` 가 실행 시 자동으로 cuda→cpu 순으로 고릅니다. 환경변수로 강제:
+```bash
+CNIE_DEVICE=cuda python sweep.py      # GPU 강제
+CNIE_DEVICE=cpu  python sweep.py      # CPU 강제
+```
+GPU 학습을 원하면 CUDA 빌드 torch 설치가 필요합니다(아래 2번의 index-url 참고).
+
+> ⚠️ **GPU 가 이 워크로드에선 오히려 느릴 수 있음.** 네트워크가 작은 MLP 이고,
+> 매 주문마다 단건(batch=1) 추론을 파이썬 이벤트 루프에서 수천 번 하며, 진짜
+> 병목은 CPU 이벤트 시뮬레이션입니다. 로컬 실측: cpu 113 ms/ep vs mps 281 ms/ep.
+> **원격에서 먼저 벤치마크 후 택하세요**:
+> ```bash
+> CNIE_DEVICE=cuda python sweep.py --smoke   # 콘솔에 "training device = cuda" + 소요시간
+> CNIE_DEVICE=cpu  python sweep.py --smoke
+> ```
+> 빠른 쪽을 쓰면 됩니다. 다중코어 원격이면 CPU 로 sweep 블록을 병렬 실행하는 편이
+> GPU 보다 훨씬 이득일 수 있습니다.
 
 ## 1. 코드 받기
 ```bash

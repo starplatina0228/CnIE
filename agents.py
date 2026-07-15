@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -25,6 +26,27 @@ EPS_MIN             = 0.02
 EPS_DECAY           = 0.997
 GRAD_CLIP           = 10.0
 N_STEP              = 3
+
+
+# ── 디바이스 선택 ──────────────────────────────────────────────────────────────
+def resolve_device(pref: str = "auto") -> torch.device:
+    """학습 디바이스 결정.
+
+      pref="auto" : cuda 가능하면 cuda, 아니면 cpu (mps 는 auto 에서 제외 — 명시 필요)
+      "cuda"/"cpu"/"mps" : 명시. 불가하면 cpu 로 폴백.
+    환경변수 CNIE_DEVICE 가 있으면 그것이 인자보다 우선한다.
+      예) CNIE_DEVICE=cuda python sweep.py     /     CNIE_DEVICE=cpu python sweep.py
+    """
+    pref = (os.environ.get("CNIE_DEVICE") or pref or "auto").lower()
+    if pref == "cpu":
+        return torch.device("cpu")
+    if pref == "cuda":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if pref == "mps":
+        ok = getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
+        return torch.device("mps" if ok else "cpu")
+    # auto
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -272,15 +294,21 @@ class NStepBuffer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DQNAgent:
+    _device_announced = False   # 디바이스 1회 안내용
+
     def __init__(self, num_robots: int, robot_capacity: int,
-                 seed: int = 42, sim_time: float = SIM_TIME):
+                 seed: int = 42, sim_time: float = SIM_TIME,
+                 device: str = "auto"):
         self.num_robots     = num_robots
         self.robot_capacity = robot_capacity
         self.state_dim      = build_state_dim(num_robots, robot_capacity)
         self.n_actions      = num_robots
         self.sim_time       = sim_time
 
-        self.device     = torch.device("cpu")
+        self.device     = resolve_device(device)
+        if not DQNAgent._device_announced:
+            print(f"[DQNAgent] training device = {self.device}")
+            DQNAgent._device_announced = True
         self.policy_net = D3QNNetwork(self.state_dim, self.n_actions).to(self.device)
         self.target_net = D3QNNetwork(self.state_dim, self.n_actions).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -331,8 +359,9 @@ class DQNAgent:
         if self.rng.random() < self.epsilon:
             return int(self.rng.choice(valid))
         with torch.no_grad():
-            q    = self.policy_net(torch.tensor(state).unsqueeze(0)).squeeze(0)
-            q_np = q.numpy().copy()
+            st   = torch.tensor(state, device=self.device).unsqueeze(0)
+            q    = self.policy_net(st).squeeze(0)
+            q_np = q.cpu().numpy().copy()
             q_np[~mask] = -np.inf
             return int(np.argmax(q_np))
 
